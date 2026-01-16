@@ -132,6 +132,16 @@ export class RedisIndexManager {
   }
 
   /**
+   * 内部方法：根据后缀获取桶的完整 Key
+   * @private
+   * @param {string} suffix - 桶后缀
+   * @returns {string} 完整桶 Key
+   */
+  _getBucketName(suffix) {
+    return `${this.indexPrefix}${suffix}`;
+  }
+
+  /**
    * 计算 Key 所属的桶名
    *
    * @private
@@ -141,7 +151,45 @@ export class RedisIndexManager {
   _getBucketKey(key) {
     const hash = crypto.createHash("md5").update(key).digest("hex");
     const bucketSuffix = hash.substring(0, this.hashChars);
-    return `${this.indexPrefix}${bucketSuffix}`;
+    return this._getBucketName(bucketSuffix);
+  }
+
+  /**
+   * 内部方法：执行原子操作 (Lua 脚本或降级 Pipeline)
+   * @private
+   * @param {string} scriptName - Lua 脚本方法名
+   * @param {Array<string>} keys - Redis Keys
+   * @param {Array<string>} args - Lua 脚本参数
+   * @param {Function} fallbackFn - 降级 Pipeline 构建函数
+   */
+  async _execAtomic(scriptName, keys, args, fallbackFn) {
+    await this._ensureConnection();
+    if (typeof this.redis[scriptName] === "function") {
+      await this.redis[scriptName](...keys, ...args);
+    } else {
+      console.warn(
+        "[RedisIndexManager] Lua scripts not supported. Falling back to non-atomic pipeline. Data consistency is NOT guaranteed."
+      );
+      const pipeline = this.redis.pipeline();
+      fallbackFn(pipeline);
+      await pipeline.exec();
+    }
+  }
+
+  /**
+   * 内部方法：构建批处理 Pipeline
+   * @private
+   * @param {Array<string>} bucketBatch - 桶后缀批次
+   * @param {Function} callback - (pipeline, bucketKey) => void
+   * @returns {Object} pipeline 对象
+   */
+  _buildBatchPipeline(bucketBatch, callback) {
+    const pipeline = this.redis.pipeline();
+    for (const bucketSuffix of bucketBatch) {
+      const bucketKey = this._getBucketName(bucketSuffix);
+      callback(pipeline, bucketKey);
+    }
+    return pipeline;
   }
 
   /**
@@ -155,20 +203,16 @@ export class RedisIndexManager {
    * @returns {Promise<void>}
    */
   async add(key, value) {
-    await this._ensureConnection();
     const bucketKey = this._getBucketKey(key);
-    // 如果支持 Lua 脚本则使用，否则降级为 Pipeline (兼容 Mock)
-    if (typeof this.redis.addIndex === "function") {
-      await this.redis.addIndex(key, bucketKey, value);
-    } else {
-      console.warn(
-        "[RedisIndexManager] Lua scripts not supported. Falling back to non-atomic pipeline. Data consistency is NOT guaranteed."
-      );
-      const pipeline = this.redis.pipeline();
-      pipeline.set(key, value);
-      pipeline.zadd(bucketKey, 0, key);
-      await pipeline.exec();
-    }
+    await this._execAtomic(
+      "addIndex",
+      [key, bucketKey],
+      [value],
+      (pipeline) => {
+        pipeline.set(key, value);
+        pipeline.zadd(bucketKey, 0, key);
+      }
+    );
   }
 
   /**
@@ -180,19 +224,11 @@ export class RedisIndexManager {
    * @returns {Promise<void>}
    */
   async del(key) {
-    await this._ensureConnection();
     const bucketKey = this._getBucketKey(key);
-    if (typeof this.redis.delIndex === "function") {
-      await this.redis.delIndex(key, bucketKey);
-    } else {
-      console.warn(
-        "[RedisIndexManager] Lua scripts not supported. Falling back to non-atomic pipeline. Data consistency is NOT guaranteed."
-      );
-      const pipeline = this.redis.pipeline();
+    await this._execAtomic("delIndex", [key, bucketKey], [], (pipeline) => {
       pipeline.del(key);
       pipeline.zrem(bucketKey, key);
-      await pipeline.exec();
-    }
+    });
   }
 
   /**
@@ -221,12 +257,12 @@ export class RedisIndexManager {
 
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const pipeline = this.redis.pipeline();
-
-      for (const bucketSuffix of bucketBatch) {
-        const bucketKey = `${this.indexPrefix}${bucketSuffix}`;
-        pipeline.zrangebylex(bucketKey, lexStart, lexEnd, "LIMIT", 0, limit);
-      }
+      const pipeline = this._buildBatchPipeline(
+        bucketBatch,
+        (p, bucketKey) => {
+          p.zrangebylex(bucketKey, lexStart, lexEnd, "LIMIT", 0, limit);
+        }
+      );
 
       const batchResults = await pipeline.exec();
 
@@ -298,12 +334,12 @@ export class RedisIndexManager {
 
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
-      const pipeline = this.redis.pipeline();
-
-      for (const bucketSuffix of bucketBatch) {
-        const bucketKey = `${this.indexPrefix}${bucketSuffix}`;
-        pipeline.zlexcount(bucketKey, lexStart, lexEnd);
-      }
+      const pipeline = this._buildBatchPipeline(
+        bucketBatch,
+        (p, bucketKey) => {
+          p.zlexcount(bucketKey, lexStart, lexEnd);
+        }
+      );
 
       promises.push(pipeline.exec());
     }
