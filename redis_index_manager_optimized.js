@@ -62,8 +62,8 @@ export class RedisIndexManager {
    */
   _initLuaScripts() {
     if (typeof this.redis.defineCommand === "function") {
-      // 避免重复定义
-      if (!this.redis.addIndex) {
+      // 避免重复定义 (检查 this.redis.addIndex 是否为函数)
+      if (typeof this.redis.addIndex !== "function") {
         this.redis.defineCommand("addIndex", {
           numberOfKeys: 2,
           lua: `
@@ -73,7 +73,7 @@ export class RedisIndexManager {
         });
       }
 
-      if (!this.redis.delIndex) {
+      if (typeof this.redis.delIndex !== "function") {
         this.redis.defineCommand("delIndex", {
           numberOfKeys: 2,
           lua: `
@@ -93,6 +93,13 @@ export class RedisIndexManager {
     if (!this.redis) {
       this.redis = new Redis(this.redisConfig);
       this._initLuaScripts();
+    } else if (
+      this.redis.status === "end" ||
+      this.redis.status === "close" ||
+      this.redis.status === "wait"
+    ) {
+      // 只有在非连接状态下才尝试重连或等待
+      // ioredis 会自动重连，这里主要用于防御性编程
     }
     // 如果是 Lazy Connect 模式，ioredis 会在第一个命令时自动连接，无需显式调用 connect
   }
@@ -288,6 +295,9 @@ export class RedisIndexManager {
 
     let totalCount = 0;
 
+    // 并发执行所有批次
+    const promises = [];
+
     for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
       const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
       const pipeline = this.redis.pipeline();
@@ -297,8 +307,12 @@ export class RedisIndexManager {
         pipeline.zlexcount(bucketKey, lexStart, lexEnd);
       }
 
-      const batchResults = await pipeline.exec();
+      promises.push(pipeline.exec());
+    }
 
+    const allBatchResults = await Promise.all(promises);
+
+    for (const batchResults of allBatchResults) {
       for (const [err, count] of batchResults) {
         if (err) {
           console.error("Count error:", err);
