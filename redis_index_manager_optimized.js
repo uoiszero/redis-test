@@ -25,6 +25,12 @@ export class RedisIndexManager {
    * @param {number} [options.hashChars=2] - Hash 分桶取前几位 (Hex)
    * @param {number} [options.scanBatchSize=50] - Scan 批处理大小
    * @param {number} [options.mgetBatchSize=200] - MGET 批处理大小
+   *
+   * @description
+   * **适用场景说明**：
+   * 本模块专为 **千万级及以上** 海量数据场景设计。
+   * 由于采用了 Hash 分桶和 Scatter-Gather (分散-聚合) 查询策略，会产生多次网络往返和并发开销。
+   * 如果数据量较小（例如少于 10 万条），直接使用单个 Redis ZSET 的性能通常优于本方案，不建议使用此管理器。
    */
   constructor(options) {
     // 检查 options.redis 是实例还是配置
