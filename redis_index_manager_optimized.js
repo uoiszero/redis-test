@@ -256,4 +256,60 @@ export class RedisIndexManager {
     }
     return result;
   }
+
+  /**
+   * 统计范围内的数据总数
+   *
+   * 利用 ZLEXCOUNT 高效统计所有分桶中符合范围的 Key 数量。
+   * 这是一个纯服务端计算操作，无需拉取数据到内存，非常快速。
+   *
+   * @param {string} startKey - 起始 Key (包含)
+   * @param {string} [endKey] - 结束 Key (包含)。自动推导逻辑同 scan。
+   * @returns {Promise<number>} 数据总数
+   */
+  async count(startKey, endKey) {
+    await this._ensureConnection();
+
+    const lexStart = `[${startKey}`;
+    let lexEnd;
+
+    if (!endKey) {
+      const match = startKey.match(/^([a-zA-Z0-9]+)(_|:|-|\/|#)/);
+      if (match) {
+        lexEnd = `[${match[0]}\xff`;
+      } else {
+        throw new Error(
+          "Cannot infer endKey from startKey. Please provide an explicit endKey to avoid full scan."
+        );
+      }
+    } else {
+      lexEnd = `[${endKey}`;
+    }
+
+    let totalCount = 0;
+
+    for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
+      const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
+      const pipeline = this.redis.pipeline();
+
+      for (const bucketSuffix of bucketBatch) {
+        const bucketKey = `${this.indexPrefix}${bucketSuffix}`;
+        pipeline.zlexcount(bucketKey, lexStart, lexEnd);
+      }
+
+      const batchResults = await pipeline.exec();
+
+      for (const [err, count] of batchResults) {
+        if (err) {
+          console.error("Count error:", err);
+          continue;
+        }
+        if (typeof count === "number") {
+          totalCount += count;
+        }
+      }
+    }
+
+    return totalCount;
+  }
 }
