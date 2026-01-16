@@ -20,12 +20,23 @@ import crypto from "crypto";
 export class RedisIndexManager {
   /**
    * @param {Object} options
-   * @param {Redis} options.redis - ioredis 实例
+   * @param {Redis|Object} [options.redis] - ioredis 实例，或 ioredis 构造函数参数 (配置对象)
    * @param {string} [options.indexPrefix="idx:"] - 索引 Key 的前缀
    * @param {number} [options.hashChars=2] - Hash 分桶取前几位 (Hex)
+   * @param {number} [options.scanBatchSize=50] - Scan 批处理大小
+   * @param {number} [options.mgetBatchSize=200] - MGET 批处理大小
    */
   constructor(options) {
-    this.redis = options.redis;
+    // 检查 options.redis 是实例还是配置
+    // ioredis 实例通常有 pipeline 方法
+    if (options.redis && typeof options.redis.pipeline === "function") {
+      this.redis = options.redis;
+      this._initLuaScripts();
+    } else {
+      // 视为配置对象，保存以备懒加载
+      this.redisConfig = options.redis;
+    }
+
     this.indexPrefix = options.indexPrefix || "idx:";
 
     const hashChars = options.hashChars || 2;
@@ -37,31 +48,53 @@ export class RedisIndexManager {
     // 配置项: 批处理大小
     this.SCAN_BATCH_SIZE = options.scanBatchSize || 50;
     this.MGET_BATCH_SIZE = options.mgetBatchSize || 200;
-    
+
     this.buckets = [];
     const maxVal = Math.pow(16, this.hashChars);
     for (let i = 0; i < maxVal; i++) {
       this.buckets.push(i.toString(16).padStart(this.hashChars, "0"));
     }
+  }
 
-    // 定义 Lua 脚本 (检查是否支持 defineCommand，方便测试 Mock)
+  /**
+   * 内部方法：初始化 Lua 脚本
+   * @private
+   */
+  _initLuaScripts() {
     if (typeof this.redis.defineCommand === "function") {
-      this.redis.defineCommand("addIndex", {
-        numberOfKeys: 2,
-        lua: `
+      // 避免重复定义
+      if (!this.redis.addIndex) {
+        this.redis.defineCommand("addIndex", {
+          numberOfKeys: 2,
+          lua: `
           redis.call('SET', KEYS[1], ARGV[1])
           redis.call('ZADD', KEYS[2], 0, KEYS[1])
         `,
-      });
+        });
+      }
 
-      this.redis.defineCommand("delIndex", {
-        numberOfKeys: 2,
-        lua: `
+      if (!this.redis.delIndex) {
+        this.redis.defineCommand("delIndex", {
+          numberOfKeys: 2,
+          lua: `
           redis.call('DEL', KEYS[1])
           redis.call('ZREM', KEYS[2], KEYS[1])
         `,
-      });
+        });
+      }
     }
+  }
+
+  /**
+   * 内部方法：确保 Redis 连接已建立 (Lazy Connect)
+   * @private
+   */
+  async _ensureConnection() {
+    if (!this.redis) {
+      this.redis = new Redis(this.redisConfig);
+      this._initLuaScripts();
+    }
+    // 如果是 Lazy Connect 模式，ioredis 会在第一个命令时自动连接，无需显式调用 connect
   }
 
   /**
@@ -88,6 +121,7 @@ export class RedisIndexManager {
    * @returns {Promise<void>}
    */
   async add(key, value) {
+    await this._ensureConnection();
     const bucketKey = this._getBucketKey(key);
     // 如果支持 Lua 脚本则使用，否则降级为 Pipeline (兼容 Mock)
     if (typeof this.redis.addIndex === "function") {
@@ -112,6 +146,7 @@ export class RedisIndexManager {
    * @returns {Promise<void>}
    */
   async del(key) {
+    await this._ensureConnection();
     const bucketKey = this._getBucketKey(key);
     if (typeof this.redis.delIndex === "function") {
       await this.redis.delIndex(key, bucketKey);
@@ -139,6 +174,7 @@ export class RedisIndexManager {
    * @throws {Error} 如果 limit 不合法或无法推导 endKey 范围时抛出异常
    */
   async scan(startKey, endKey, limit = 100) {
+    await this._ensureConnection();
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
       throw new Error("Limit must be an integer between 1 and 1000");
     }
