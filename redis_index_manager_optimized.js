@@ -105,6 +105,33 @@ export class RedisIndexManager {
   }
 
   /**
+   * 内部方法：推导 Key 的字典序范围
+   * @private
+   * @param {string} startKey - 起始 Key
+   * @param {string} [endKey] - 结束 Key
+   * @returns {{lexStart: string, lexEnd: string}} Redis ZSET 字典序范围
+   */
+  _inferRange(startKey, endKey) {
+    const lexStart = `[${startKey}`;
+    let lexEnd;
+
+    if (!endKey) {
+      const match = startKey.match(/^([a-zA-Z0-9]+)(_|:|-|\/|#)/);
+      if (match) {
+        lexEnd = `[${match[0]}\xff`;
+      } else {
+        throw new Error(
+          "Cannot infer endKey from startKey. Please provide an explicit endKey to avoid full scan."
+        );
+      }
+    } else {
+      lexEnd = `[${endKey}`;
+    }
+
+    return { lexStart, lexEnd };
+  }
+
+  /**
    * 计算 Key 所属的桶名
    *
    * @private
@@ -186,22 +213,7 @@ export class RedisIndexManager {
       throw new Error("Limit must be an integer between 1 and 1000");
     }
 
-    const lexStart = `[${startKey}`;
-    let lexEnd;
-
-    if (!endKey) {
-      const match = startKey.match(/^([a-zA-Z0-9]+)(_|:|-|\/|#)/);
-      if (match) {
-        lexEnd = `[${match[0]}\xff`;
-      } else {
-        // 安全改进：无法推导时抛出错误
-        throw new Error(
-          "Cannot infer endKey from startKey. Please provide an explicit endKey to avoid full scan."
-        );
-      }
-    } else {
-      lexEnd = `[${endKey}`;
-    }
+    const { lexStart, lexEnd } = this._inferRange(startKey, endKey);
 
     // console.log(`[Scan Optimized] Range: [${startKey}, ${endKey || "AUTO"}], Limit: ${limit}`);
 
@@ -277,21 +289,7 @@ export class RedisIndexManager {
   async count(startKey, endKey) {
     await this._ensureConnection();
 
-    const lexStart = `[${startKey}`;
-    let lexEnd;
-
-    if (!endKey) {
-      const match = startKey.match(/^([a-zA-Z0-9]+)(_|:|-|\/|#)/);
-      if (match) {
-        lexEnd = `[${match[0]}\xff`;
-      } else {
-        throw new Error(
-          "Cannot infer endKey from startKey. Please provide an explicit endKey to avoid full scan."
-        );
-      }
-    } else {
-      lexEnd = `[${endKey}`;
-    }
+    const { lexStart, lexEnd } = this._inferRange(startKey, endKey);
 
     let totalCount = 0;
 
