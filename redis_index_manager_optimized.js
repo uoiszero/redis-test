@@ -34,6 +34,10 @@ export class RedisIndexManager {
     }
     this.hashChars = hashChars;
 
+    // 配置项: 批处理大小
+    this.SCAN_BATCH_SIZE = options.scanBatchSize || 50;
+    this.MGET_BATCH_SIZE = options.mgetBatchSize || 200;
+    
     this.buckets = [];
     const maxVal = Math.pow(16, this.hashChars);
     for (let i = 0; i < maxVal; i++) {
@@ -89,6 +93,9 @@ export class RedisIndexManager {
     if (typeof this.redis.addIndex === "function") {
       await this.redis.addIndex(key, bucketKey, value);
     } else {
+      console.warn(
+        "[RedisIndexManager] Lua scripts not supported. Falling back to non-atomic pipeline. Data consistency is NOT guaranteed."
+      );
       const pipeline = this.redis.pipeline();
       pipeline.set(key, value);
       pipeline.zadd(bucketKey, 0, key);
@@ -109,6 +116,9 @@ export class RedisIndexManager {
     if (typeof this.redis.delIndex === "function") {
       await this.redis.delIndex(key, bucketKey);
     } else {
+      console.warn(
+        "[RedisIndexManager] Lua scripts not supported. Falling back to non-atomic pipeline. Data consistency is NOT guaranteed."
+      );
       const pipeline = this.redis.pipeline();
       pipeline.del(key);
       pipeline.zrem(bucketKey, key);
@@ -137,7 +147,7 @@ export class RedisIndexManager {
     let lexEnd;
 
     if (!endKey) {
-      const match = startKey.match(/^([a-zA-Z0-9]+)(_|:)/);
+      const match = startKey.match(/^([a-zA-Z0-9]+)(_|:|-|\/|#)/);
       if (match) {
         lexEnd = `[${match[0]}\xff`;
       } else {
@@ -152,11 +162,10 @@ export class RedisIndexManager {
 
     // console.log(`[Scan Optimized] Range: [${startKey}, ${endKey || "AUTO"}], Limit: ${limit}`);
 
-    const BATCH_SIZE = 50;
     let allKeys = [];
 
-    for (let i = 0; i < this.buckets.length; i += BATCH_SIZE) {
-      const bucketBatch = this.buckets.slice(i, i + BATCH_SIZE);
+    for (let i = 0; i < this.buckets.length; i += this.SCAN_BATCH_SIZE) {
+      const bucketBatch = this.buckets.slice(i, i + this.SCAN_BATCH_SIZE);
       const pipeline = this.redis.pipeline();
 
       for (const bucketSuffix of bucketBatch) {
@@ -194,11 +203,10 @@ export class RedisIndexManager {
       return [];
     }
 
-    const MGET_BATCH_SIZE = 200;
     const valuePromises = [];
     
-    for (let i = 0; i < allKeys.length; i += MGET_BATCH_SIZE) {
-      const batchKeys = allKeys.slice(i, i + MGET_BATCH_SIZE);
+    for (let i = 0; i < allKeys.length; i += this.MGET_BATCH_SIZE) {
+      const batchKeys = allKeys.slice(i, i + this.MGET_BATCH_SIZE);
       valuePromises.push(this.redis.mget(batchKeys));
     }
 
