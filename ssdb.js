@@ -26,31 +26,17 @@ async function mset() {
   console.log(result);
 }
 
-async function scanStream() {
-  return new Promise((resolve, reject) => {
-    let result;
-    //获取所有以 test:: 开头的 key
-    const stream = redis.scanStream({
-      match: "test:*"
-    });
-
-    stream.on("data", (resultKeys, val) => {
-      stream.pause();
-      console.log(resultKeys, val);
-      stream.resume();
-    });
-    stream.on("end", () => {
-      return resolve();
-    })
-  })
-}
-
-async function scan() {
-  let result = await redis.scan(0, "MATCH", "test:*");
-  console.log(result);
-}
-
 (async () => {
-  await scanStream();
+  let i = 0;
+  while (i < 10) {
+    const timestamp = Date.now();
+    const key = `test::${i}`;
+    const val = {
+      timestamp,
+      value: i
+    }
+    let result = await redis.zadd("update-es", key, val);
+    console.log(result);
+  }
   redis.disconnect();
 })();
