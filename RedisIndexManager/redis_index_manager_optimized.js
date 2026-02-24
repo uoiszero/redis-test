@@ -448,4 +448,103 @@ export class RedisIndexManager {
 
     return totalCount;
   }
+
+  /**
+   * 获取索引调试统计信息
+   *
+   * 用于分析分桶的健康状况，例如总数据量、每个桶的负载、是否存在数据倾斜等。
+   *
+   * @param {boolean} [details=false] - 是否返回每个桶的详细数据量 (可能会比较大)
+   * @returns {Promise<Object>} 统计信息对象
+   */
+  async getDebugStats(details = false) {
+    await this._ensureConnection();
+
+    // 1. 使用 Pipeline 批量获取所有桶的大小 (ZCARD)
+    const pipeline = this.redis.pipeline();
+    for (const suffix of this.buckets) {
+      const bucketKey = this._getBucketName(suffix);
+      pipeline.zcard(bucketKey);
+    }
+
+    const results = await pipeline.exec();
+
+    // 2. 统计分析
+    let totalItems = 0;
+    let minItems = Number.MAX_SAFE_INTEGER;
+    let maxItems = 0;
+    let emptyBuckets = 0;
+    
+    let minBucketSuffix = "";
+    let maxBucketSuffix = "";
+
+    const bucketsData = {};
+
+    for (let i = 0; i < results.length; i++) {
+      const [err, count] = results[i];
+      const suffix = this.buckets[i];
+
+      if (err) {
+        console.error(`Error getting ZCARD for bucket ${suffix}:`, err);
+        continue;
+      }
+
+      // 确保 count 是数字
+      const size = typeof count === "number" ? count : 0;
+      
+      totalItems += size;
+
+      if (size === 0) {
+        emptyBuckets++;
+      }
+
+      if (size < minItems) {
+        minItems = size;
+        minBucketSuffix = suffix;
+      }
+
+      if (size > maxItems) {
+        maxItems = size;
+        maxBucketSuffix = suffix;
+      }
+
+      if (details) {
+        bucketsData[suffix] = size;
+      }
+    }
+
+    // 如果所有桶都为空，minItems 重置为 0
+    if (totalItems === 0) {
+        minItems = 0;
+    }
+
+    const totalBuckets = this.buckets.length;
+    const avgItems = totalBuckets > 0 ? totalItems / totalBuckets : 0;
+
+    // 3. 构建返回对象
+    const stats = {
+      meta: {
+        hashChars: this.hashChars,
+        totalBuckets: totalBuckets,
+        indexPrefix: this.indexPrefix,
+      },
+      stats: {
+        totalItems: totalItems,
+        avgItems: parseFloat(avgItems.toFixed(2)),
+        minItems: minItems,
+        maxItems: maxItems,
+        emptyBuckets: emptyBuckets,
+      },
+      outliers: {
+        maxBucket: { suffix: maxBucketSuffix, count: maxItems },
+        minBucket: { suffix: minBucketSuffix, count: minItems },
+      },
+    };
+
+    if (details) {
+      stats.buckets = bucketsData;
+    }
+
+    return stats;
+  }
 }
