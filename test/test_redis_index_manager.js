@@ -190,7 +190,7 @@ async function cleanupData(manager, dataPrefix) {
     
     // Safety limit to prevent infinite loops
     let loopCount = 0;
-    const MAX_LOOPS = 1000; // Increase max loops as we might process many batches
+    const MAX_LOOPS = 5000; // Increase max loops as we might process many batches
 
     while (loopCount < MAX_LOOPS) {
         loopCount++;
@@ -318,7 +318,7 @@ async function runTest() {
     });
 
     const DATA_PREFIX = "test_user:";
-    const WRITE_COUNT = 100000;
+    const WRITE_COUNT = 1000000;
 
     // 3. Write Data
     console.time('Write Data');
