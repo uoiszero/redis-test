@@ -1,6 +1,7 @@
 {
   "name": "redis-index-manager",
   "version": "1.0.0",
+  "type": "module",
   "description": "High-performance Redis secondary index manager with hash sharding",
   "main": "dist/index.cjs",
   "module": "dist/index.mjs",
