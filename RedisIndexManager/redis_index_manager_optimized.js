@@ -154,7 +154,12 @@ export class RedisIndexManager {
     if (!endKey) {
       const match = startKey.match(/^([a-zA-Z0-9]+)(_|:|-|\/|#)/);
       if (match) {
-        lexEnd = `[${match[0]}\xff`;
+        // Fix: Use prefix + 1 char to cover all subsequent keys including UTF-8 chars
+        const prefix = match[0];
+        const lastChar = prefix.slice(-1);
+        const nextChar = String.fromCharCode(lastChar.charCodeAt(0) + 1);
+        const nextPrefix = prefix.slice(0, -1) + nextChar;
+        lexEnd = `(${nextPrefix}`;
       } else {
         throw new Error(
           "Cannot infer endKey from startKey. Please provide an explicit endKey to avoid full scan."
@@ -298,38 +303,44 @@ export class RedisIndexManager {
       return;
     }
 
-    if (this.isCluster) {
-      // Cluster 模式：使用 Pipeline 并发删除
-      // ioredis 的 Cluster Pipeline 会自动将命令按 Slot 分组并行执行
-      const pipeline = this.redis.pipeline();
-      for (const key of keys) {
-        const bucketKey = this._getBucketKey(key);
-        pipeline.del(key);
-        pipeline.zrem(bucketKey, key);
-      }
-      await pipeline.exec();
-    } else {
-      const keysAndBuckets = [];
-      for (const key of keys) {
-        const bucketKey = this._getBucketKey(key);
-        keysAndBuckets.push(key, bucketKey);
-      }
+    // Fix: Process in batches to avoid stack overflow
+    const BATCH_SIZE = 1000;
 
-      // ioredis 自定义命令如果不指定 numberOfKeys，第一个参数必须是 key 的数量
-      // 所有的参数都是 Key (key, bucketKey, key, bucketKey...)
-      await this._execAtomic(
-        "mDelIndex",
-        [keysAndBuckets.length, ...keysAndBuckets],
-        [],
-        (pipeline) => {
-          for (let i = 0; i < keysAndBuckets.length; i += 2) {
-            const key = keysAndBuckets[i];
-            const bucketKey = keysAndBuckets[i + 1];
-            pipeline.del(key);
-            pipeline.zrem(bucketKey, key);
-          }
+    for (let i = 0; i < keys.length; i += BATCH_SIZE) {
+      const batchKeys = keys.slice(i, i + BATCH_SIZE);
+
+      if (this.isCluster) {
+        // Cluster 模式：使用 Pipeline 并发删除
+        const pipeline = this.redis.pipeline();
+        for (const key of batchKeys) {
+          const bucketKey = this._getBucketKey(key);
+          pipeline.del(key);
+          pipeline.zrem(bucketKey, key);
         }
-      );
+        await pipeline.exec();
+      } else {
+        const keysAndBuckets = [];
+        for (const key of batchKeys) {
+          const bucketKey = this._getBucketKey(key);
+          keysAndBuckets.push(key, bucketKey);
+        }
+
+        // ioredis 自定义命令如果不指定 numberOfKeys，第一个参数必须是 key 的数量
+        // 所有的参数都是 Key (key, bucketKey, key, bucketKey...)
+        await this._execAtomic(
+          "mDelIndex",
+          [keysAndBuckets.length, ...keysAndBuckets],
+          [],
+          (pipeline) => {
+            for (let j = 0; j < keysAndBuckets.length; j += 2) {
+              const key = keysAndBuckets[j];
+              const bucketKey = keysAndBuckets[j + 1];
+              pipeline.del(key);
+              pipeline.zrem(bucketKey, key);
+            }
+          }
+        );
+      }
     }
   }
 
