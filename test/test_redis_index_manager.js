@@ -318,21 +318,29 @@ async function runTest() {
     });
 
     const DATA_PREFIX = "test_user:";
-    const WRITE_COUNT = 10000;
+    const WRITE_COUNT = 100000;
 
     // 3. Write Data
+    console.time('Write Data');
     await testWriteData(manager, DATA_PREFIX, WRITE_COUNT);
+    console.timeEnd('Write Data');
 
     // 4. Scan and Verify Data
+    console.time('Scan and Verify Data');
     await testScanData(manager, DATA_PREFIX, WRITE_COUNT);
+    console.timeEnd('Scan and Verify Data');
 
     // 5. Test Partial Delete and Rewrite
     // 为了不影响 cleanupData，我们在这个函数内部完成自己的清理或者在 cleanupData 中适配
     // 但 cleanupData 是全量清理，所以这里可以直接调用，不影响后续清理逻辑
+    console.time('Partial Delete and Rewrite');
     await testPartialDeleteAndRewrite(manager, DATA_PREFIX, WRITE_COUNT);
+    console.timeEnd('Partial Delete and Rewrite');
 
     // 6. Cleanup Data
+    console.time('Cleanup Data');
     await cleanupData(manager, DATA_PREFIX);
+    console.timeEnd('Cleanup Data');
 
   } catch (error) {
     console.error("Test failed:", error);
