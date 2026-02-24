@@ -81,6 +81,94 @@ async function testScanData(manager, dataPrefix, expectedCount) {
 }
 
 /**
+ * 测试部分删除和重新写入
+ *
+ * 1. Scan 获取一半数据。
+ * 2. 删除这部分数据。
+ * 3. 验证剩余数量是否正确。
+ * 4. 写入 123 条新数据。
+ * 5. 验证总数量是否正确。
+ *
+ * @param {RedisIndexManager} manager
+ * @param {string} dataPrefix
+ * @param {number} totalCount
+ */
+async function testPartialDeleteAndRewrite(manager, dataPrefix, totalCount) {
+    console.log("\n=== Testing Partial Delete and Rewrite ===");
+    const deleteCount = Math.floor(totalCount / 2);
+    console.log(`Scanning first ${deleteCount} items to delete...`);
+
+    // 由于 scan 的 limit 参数限制在 1-1000，我们需要分批获取并删除
+    console.log(`Scanning and deleting first ${deleteCount} items in batches...`);
+    
+    let deletedSoFar = 0;
+    const SCAN_LIMIT = 1000;
+
+    while (deletedSoFar < deleteCount) {
+        // 计算本次需要获取的数量
+        const limit = Math.min(SCAN_LIMIT, deleteCount - deletedSoFar);
+        
+        // 每次都从头开始 scan，因为之前的数据已经被删除了
+        // 这样可以确保每次取到的都是当前剩余数据的“前N个”
+        const scanResult = await manager.scan(dataPrefix, undefined, limit);
+        
+        if (scanResult.length === 0) {
+            console.warn("Scan returned no data, but delete count not reached.");
+            break;
+        }
+
+        const keysToDelete = [];
+        for (let i = 0; i < scanResult.length; i += 2) {
+            keysToDelete.push(scanResult[i]);
+        }
+        
+        await manager.del(keysToDelete);
+        deletedSoFar += keysToDelete.length;
+        
+        if (deletedSoFar % 1000 === 0) {
+            console.log(`  Deleted ${deletedSoFar}/${deleteCount}...`);
+        }
+    }
+
+    // 验证剩余数量
+    const remainingCount = await manager.count(dataPrefix);
+    const expectedRemaining = totalCount - deleteCount;
+    console.log(`Remaining count: ${remainingCount}, Expected: ${expectedRemaining}`);
+    
+    if (remainingCount === expectedRemaining) {
+        console.log("✅ Partial delete verification passed.");
+    } else {
+        console.error(`❌ Partial delete verification failed!`);
+    }
+
+    // 写入 123 条新数据
+    const newCount = 123;
+    console.log(`Writing ${newCount} new items...`);
+    const newItems = [];
+    for (let i = 0; i < newCount; i++) {
+        const id = `new_${i.toString().padStart(5, "0")}`;
+        const key = `${dataPrefix}${id}`;
+        const value = JSON.stringify({ id, name: `New User ${id}`, timestamp: Date.now() });
+        newItems.push({ key, value });
+    }
+    
+    // 并发写入
+    await Promise.all(newItems.map(item => manager.add(item.key, item.value)));
+
+    // 验证最终数量
+    const finalCount = await manager.count(dataPrefix);
+    const expectedFinal = expectedRemaining + newCount;
+    console.log(`Final count: ${finalCount}, Expected: ${expectedFinal}`);
+
+    if (finalCount === expectedFinal) {
+        console.log("✅ Rewrite verification passed.");
+    } else {
+        console.error(`❌ Rewrite verification failed!`);
+    }
+    console.log("=== Partial Delete and Rewrite Test Completed ===\n");
+}
+
+/**
  * 清理测试数据
  * 
  * 采用流式清理策略 (Streaming Deletion)：
@@ -237,6 +325,11 @@ async function runTest() {
 
     // 4. Scan and Verify Data
     await testScanData(manager, DATA_PREFIX, WRITE_COUNT);
+
+    // 5. Test Partial Delete and Rewrite
+    // 为了不影响 cleanupData，我们在这个函数内部完成自己的清理或者在 cleanupData 中适配
+    // 但 cleanupData 是全量清理，所以这里可以直接调用，不影响后续清理逻辑
+    await testPartialDeleteAndRewrite(manager, DATA_PREFIX, WRITE_COUNT);
 
     // 6. Cleanup Data
     await cleanupData(manager, DATA_PREFIX);
