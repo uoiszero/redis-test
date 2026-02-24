@@ -8,12 +8,19 @@ import crypto from "crypto";
  *
  * 核心特性：
  * 1. **分桶策略**：对 Key 进行 Hash 后取前 N 位 (Hex) 分桶，将索引均匀打散到多个 ZSET 中。
- * 2. **Scatter-Gather 查询**：范围查询时并发扫描所有相关桶，并在内存中进行归并排序。
- * 3. **内存保护**：Scan 采用分批合并 (Incremental Merge) 策略，防止 Limit 放大效应导致的内存溢出。
- * 4. **原子操作**：使用 Lua 脚本保证索引与源数据的一致性。
- *
- * @example
- * const manager = new RedisIndexManager({ redis: redisClient, hashChars: 2 });
+   * 2. **Scatter-Gather 查询**：范围查询时并发扫描所有相关桶，并在内存中进行归并排序。
+   * 3. **内存保护**：Scan 采用分批合并 (Incremental Merge) 策略，防止 Limit 放大效应导致的内存溢出。
+   * 4. **原子操作**：使用 Lua 脚本保证索引与源数据的一致性。
+   *
+   * **Redis Cluster 注意事项**：
+   * 本模块的原子性依赖 Lua 脚本同时操作 Data Key 和 Index Bucket Key。
+   * 在 Redis Cluster 模式下，除非这两个 Key 在同一个 Slot (使用 Hash Tag {...})，否则 Lua 脚本会报错 `CROSSSLOT`。
+   * 由于本模块采用 Hash 分桶策略，Data Key 和 Bucket Key 天然很难在同一个 Slot。
+   * 因此，**本模块默认仅适用于单机 Redis 或支持多 Key 事务的代理环境**。
+   * 如果需要在 Cluster 下使用，建议放弃原子性，修改 `add/del` 为分步操作。
+   *
+   * @example
+   * const manager = new RedisIndexManager({ redis: redisClient, hashChars: 2 });
  * await manager.add("user:1001", JSON.stringify({ name: "Alice" }));
  * const users = await manager.scan("user:1000", "user:1005", 10);
  */
@@ -35,12 +42,20 @@ export class RedisIndexManager {
   constructor(options) {
     // 检查 options.redis 是实例还是配置
     // ioredis 实例通常有 pipeline 方法
+    this.isCluster = false;
+
     if (options.redis && typeof options.redis.pipeline === "function") {
       this.redis = options.redis;
+      // ioredis 的 Cluster 实例通常有 isCluster 属性
+      this.isCluster = !!this.redis.isCluster;
       this._initLuaScripts();
     } else {
       // 视为配置对象，保存以备懒加载
       this.redisConfig = options.redis;
+      // 如果配置是数组，说明是 Cluster 节点列表
+      if (Array.isArray(options.redis)) {
+        this.isCluster = true;
+      }
     }
 
     this.indexPrefix = options.indexPrefix || "idx:";
@@ -88,6 +103,17 @@ export class RedisIndexManager {
         `,
         });
       }
+
+      if (typeof this.redis.mDelIndex !== "function") {
+        this.redis.defineCommand("mDelIndex", {
+          lua: `
+          for i=1, #KEYS, 2 do
+            redis.call('DEL', KEYS[i])
+            redis.call('ZREM', KEYS[i+1], KEYS[i])
+          end
+        `,
+        });
+      }
     }
   }
 
@@ -97,7 +123,11 @@ export class RedisIndexManager {
    */
   async _ensureConnection() {
     if (!this.redis) {
-      this.redis = new Redis(this.redisConfig);
+      if (this.isCluster) {
+        this.redis = new Redis.Cluster(this.redisConfig);
+      } else {
+        this.redis = new Redis(this.redisConfig);
+      }
       this._initLuaScripts();
     } else if (
       this.redis.status === "end" ||
@@ -210,15 +240,25 @@ export class RedisIndexManager {
    */
   async add(key, value) {
     const bucketKey = this._getBucketKey(key);
-    await this._execAtomic(
-      "addIndex",
-      [key, bucketKey],
-      [value],
-      (pipeline) => {
-        pipeline.set(key, value);
-        pipeline.zadd(bucketKey, 0, key);
-      }
-    );
+    
+    if (this.isCluster) {
+      // Cluster 模式：分步执行，无法保证原子性，但能避免 CROSSSLOT 错误
+      // 并行执行以提高效率
+      await Promise.all([
+        this.redis.set(key, value),
+        this.redis.zadd(bucketKey, 0, key)
+      ]);
+    } else {
+      await this._execAtomic(
+        "addIndex",
+        [key, bucketKey],
+        [value],
+        (pipeline) => {
+          pipeline.set(key, value);
+          pipeline.zadd(bucketKey, 0, key);
+        }
+      );
+    }
   }
 
   /**
@@ -231,10 +271,66 @@ export class RedisIndexManager {
    */
   async del(key) {
     const bucketKey = this._getBucketKey(key);
-    await this._execAtomic("delIndex", [key, bucketKey], [], (pipeline) => {
-      pipeline.del(key);
-      pipeline.zrem(bucketKey, key);
-    });
+    
+    if (this.isCluster) {
+      await Promise.all([
+        this.redis.del(key),
+        this.redis.zrem(bucketKey, key)
+      ]);
+    } else {
+      await this._execAtomic("delIndex", [key, bucketKey], [], (pipeline) => {
+        pipeline.del(key);
+        pipeline.zrem(bucketKey, key);
+      });
+    }
+  }
+
+  /**
+   * 批量删除多个数据及其索引 (原子操作)
+   *
+   * 使用 Lua 脚本一次性删除多个 KV 数据和 ZSET 中的索引条目。
+   *
+   * @param {Array<string>} keys - 待删除的 keys 数组
+   * @returns {Promise<void>}
+   */
+  async mDel(keys) {
+    if (!Array.isArray(keys) || keys.length === 0) {
+      return;
+    }
+
+    if (this.isCluster) {
+      // Cluster 模式：使用 Pipeline 并发删除
+      // ioredis 的 Cluster Pipeline 会自动将命令按 Slot 分组并行执行
+      const pipeline = this.redis.pipeline();
+      for (const key of keys) {
+        const bucketKey = this._getBucketKey(key);
+        pipeline.del(key);
+        pipeline.zrem(bucketKey, key);
+      }
+      await pipeline.exec();
+    } else {
+      const keysAndBuckets = [];
+      for (const key of keys) {
+        const bucketKey = this._getBucketKey(key);
+        keysAndBuckets.push(key, bucketKey);
+      }
+
+      // ioredis 自定义命令如果不指定 numberOfKeys，第一个参数必须是 key 的数量
+      // 所有的参数都是 Key (key, bucketKey, key, bucketKey...)
+      await this._execAtomic(
+        "mDelIndex",
+        [keysAndBuckets.length, ...keysAndBuckets],
+        [],
+        (pipeline) => {
+          for (let i = 0; i < keysAndBuckets.length; i += 2) {
+            const key = keysAndBuckets[i];
+            const bucketKey = keysAndBuckets[i + 1];
+            pipeline.del(key);
+            pipeline.zrem(bucketKey, key);
+          }
+        }
+      );
+    }
   }
 
   /**
