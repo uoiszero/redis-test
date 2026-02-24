@@ -94,16 +94,6 @@ export class RedisIndexManager {
         });
       }
 
-      if (typeof this.redis.delIndex !== "function") {
-        this.redis.defineCommand("delIndex", {
-          numberOfKeys: 2,
-          lua: `
-          redis.call('DEL', KEYS[1])
-          redis.call('ZREM', KEYS[2], KEYS[1])
-        `,
-        });
-      }
-
       if (typeof this.redis.mDelIndex !== "function") {
         this.redis.defineCommand("mDelIndex", {
           lua: `
@@ -267,38 +257,23 @@ export class RedisIndexManager {
   }
 
   /**
-   * 删除数据及其索引 (原子操作)
+   * 删除数据及其索引 (支持单条或批量原子删除)
    *
-   * 使用 Lua 脚本同时删除 KV 数据和 ZSET 中的索引条目。
-   *
-   * @param {string} key - 待删除数据的唯一标识
-   * @returns {Promise<void>}
-   */
-  async del(key) {
-    const bucketKey = this._getBucketKey(key);
-    
-    if (this.isCluster) {
-      await Promise.all([
-        this.redis.del(key),
-        this.redis.zrem(bucketKey, key)
-      ]);
-    } else {
-      await this._execAtomic("delIndex", [key, bucketKey], [], (pipeline) => {
-        pipeline.del(key);
-        pipeline.zrem(bucketKey, key);
-      });
-    }
-  }
-
-  /**
-   * 批量删除多个数据及其索引 (原子操作)
+   * 自动识别参数类型：
+   * - 传入字符串：作为单个 Key 删除
+   * - 传入字符串数组：作为多个 Key 批量删除
    *
    * 使用 Lua 脚本一次性删除多个 KV 数据和 ZSET 中的索引条目。
    *
-   * @param {Array<string>} keys - 待删除的 keys 数组
+   * @param {string|Array<string>} keys - 待删除的 key 或 keys 数组
    * @returns {Promise<void>}
    */
-  async mDel(keys) {
+  async del(keys) {
+    // 兼容单字符串参数
+    if (typeof keys === "string") {
+      keys = [keys];
+    }
+
     if (!Array.isArray(keys) || keys.length === 0) {
       return;
     }
