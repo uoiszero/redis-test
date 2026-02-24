@@ -125,7 +125,7 @@ async function testPartialDeleteAndRewrite(manager, dataPrefix, totalCount) {
         await manager.del(keysToDelete);
         deletedSoFar += keysToDelete.length;
         
-        if (deletedSoFar % 1000 === 0) {
+        if (deletedSoFar % 50000 === 0) {
             console.log(`  Deleted ${deletedSoFar}/${deleteCount}...`);
         }
     }
@@ -325,6 +325,9 @@ async function runTest() {
     await testWriteData(manager, DATA_PREFIX, WRITE_COUNT);
     console.timeEnd('Write Data');
 
+    // 调试：第一次写入后
+    const stats1 = await manager.getDebugStats();
+
     // 4. Scan and Verify Data
     console.time('Scan and Verify Data');
     await testScanData(manager, DATA_PREFIX, WRITE_COUNT);
@@ -337,10 +340,43 @@ async function runTest() {
     await testPartialDeleteAndRewrite(manager, DATA_PREFIX, WRITE_COUNT);
     console.timeEnd('Partial Delete and Rewrite');
 
+    // 调试：删除一半并重写后
+    const stats2 = await manager.getDebugStats();
+
     // 6. Cleanup Data
     console.time('Cleanup Data');
     await cleanupData(manager, DATA_PREFIX);
     console.timeEnd('Cleanup Data');
+
+    // 输出最终统计结果
+    console.log("\n\n#############################################");
+    console.log("#            Benchmark Report               #");
+    console.log("#############################################\n");
+
+    console.log("--- 1. Initial State (After writing 1,000,000 items) ---");
+    console.log(`Total Items: ${stats1.stats.totalItems}`);
+    console.log(`Avg Bucket Size: ${stats1.stats.avgItems}`);
+    console.log(`Max Bucket: ${stats1.stats.maxItems} (suffix: ${stats1.outliers.maxBucket.suffix})`);
+    console.log(`Min Bucket: ${stats1.stats.minItems} (suffix: ${stats1.outliers.minBucket.suffix})`);
+    console.log(`Skew Ratio: ${(stats1.stats.maxItems / stats1.stats.avgItems).toFixed(2)}`);
+
+    console.log("\n--- 2. After Partial Delete & Rewrite (Delete 500k, Add 123) ---");
+    console.log(`Total Items: ${stats2.stats.totalItems}`);
+    console.log(`Avg Bucket Size: ${stats2.stats.avgItems}`);
+    console.log(`Max Bucket: ${stats2.stats.maxItems} (suffix: ${stats2.outliers.maxBucket.suffix})`);
+    console.log(`Min Bucket: ${stats2.stats.minItems} (suffix: ${stats2.outliers.minBucket.suffix})`);
+    console.log(`Skew Ratio: ${(stats2.stats.maxItems / stats2.stats.avgItems).toFixed(2)}`);
+    
+    console.log("\n---------------------------------------------");
+    console.log("Analysis:");
+    const diff = stats2.stats.totalItems - stats1.stats.totalItems;
+    console.log(`Net Change: ${diff} items (Expected: -500,000 + 123 = -499,877)`);
+    if (diff === -499877) {
+        console.log("✅ Data consistency verified.");
+    } else {
+        console.error("❌ Data consistency mismatch!");
+    }
+    console.log("#############################################\n");
 
   } catch (error) {
     console.error("Test failed:", error);
