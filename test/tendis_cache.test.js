@@ -10,6 +10,7 @@ console.log("Redis Connection Test (PING):", pingResult);
 
 const QUEUE_KEY = `${PREFIX}queue`;
 const PRODUCER_INTERVAL = 100;
+const BATCH_SIZE = 100;
 const CONSUMER_INTERVAL = 10000;
 const CACHE_DURATION = 11000;
 const PRODUCER_DURATION = 50000;
@@ -43,7 +44,7 @@ async function processData(dataList) {
 
   for (const item of dataList) {
     try {
-      await new Promise(resolve => setTimeout(resolve, 1));
+      // await new Promise(resolve => setTimeout(resolve, 1));
       const random = Math.random();
       if (random < successRate) {
         success.push(item);
@@ -60,26 +61,30 @@ async function processData(dataList) {
 
 /**
  * 子程序1：模拟消息队列生产者
- * 每100ms向zset写入一条数据，以时间戳作为score
+ * 每100ms向zset批量写入100条数据，以时间戳作为score
  */
 function startProducer() {
-  console.log(`[Producer] 启动生产者，每${PRODUCER_INTERVAL}ms写入数据`);
-  const startTime = Date.now();
+  console.log(`[Producer] 启动生产者，每${PRODUCER_INTERVAL}ms写入${BATCH_SIZE}条数据`);
 
   producerTimer = setInterval(async () => {
     if (isCleanup || isTestEnded) return;
 
     const timestamp = Date.now();
-    const data = {
-      id: dataCounter++,
-      message: `test_data_${dataCounter}`,
-      timestamp: timestamp
-    };
-    await redis.zadd(QUEUE_KEY, timestamp, JSON.stringify(data));
-    stats.totalWritten++;
-    stats.writeTimes.push(timestamp - startTime);
+    const members = [];
 
-    if (dataCounter % 50 === 0) {
+    for (let i = 0; i < BATCH_SIZE; i++) {
+      const data = {
+        id: dataCounter++,
+        message: `test_data_${dataCounter}`,
+        timestamp: timestamp + i
+      };
+      members.push(timestamp + i, JSON.stringify(data));
+    }
+
+    await redis.zadd(QUEUE_KEY, ...members);
+    stats.totalWritten += BATCH_SIZE;
+
+    if (dataCounter % 500 === 0) {
       const currentCount = await redis.zcard(QUEUE_KEY);
       console.log(`[Producer] 已写入: ${stats.totalWritten}条, zset当前: ${currentCount}条`);
     }
@@ -102,7 +107,8 @@ function startProducer() {
  * 3. 处理成功后用 zrem 删除已处理的数据
  */
 function startConsumer() {
-  console.log(`[Consumer] 启动消费者，每${CONSUMER_INTERVAL/1000}秒执行一次`);
+  if (consumerTimer) return;
+  console.log(`[Consumer] 启动消费者定时器，每${CONSUMER_INTERVAL/1000}秒执行一次`);
   consumerTimer = setInterval(consumeData, CONSUMER_INTERVAL);
 }
 
