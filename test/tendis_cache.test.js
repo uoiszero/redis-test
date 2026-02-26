@@ -37,11 +37,17 @@ const stats = {
 async function processData(dataList) {
   const success = [];
   const failed = [];
+  const successRate = 0.95;
 
   for (const item of dataList) {
     try {
       await new Promise(resolve => setTimeout(resolve, 1));
-      success.push(item);
+      const random = Math.random();
+      if (random < successRate) {
+        success.push(item);
+      } else {
+        failed.push(item);
+      }
     } catch (e) {
       failed.push(item);
     }
