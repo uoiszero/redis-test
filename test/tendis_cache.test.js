@@ -17,8 +17,10 @@ const CONSUMER_DURATION = 70000;
 
 let producerTimer = null;
 let consumerTimer = null;
+let producerStopTimer = null;
 let dataCounter = 0;
 let isCleanup = false;
+let isTestEnded = false;
 
 const stats = {
   totalWritten: 0,
@@ -65,6 +67,8 @@ function startProducer() {
   const startTime = Date.now();
 
   producerTimer = setInterval(async () => {
+    if (isCleanup || isTestEnded) return;
+
     const timestamp = Date.now();
     const data = {
       id: dataCounter++,
@@ -81,7 +85,7 @@ function startProducer() {
     }
   }, PRODUCER_INTERVAL);
 
-  setTimeout(() => {
+  producerStopTimer = setTimeout(() => {
     if (producerTimer) {
       clearInterval(producerTimer);
       producerTimer = null;
@@ -103,11 +107,18 @@ function startConsumer() {
 }
 
 async function consumeData() {
+  if (isCleanup || isTestEnded) return;
+
   const executeStartTime = Date.now();
   console.log(`\n[Consumer] === 开始执行 ===`);
 
   clearInterval(consumerTimer);
   consumerTimer = null;
+
+  if (isCleanup || isTestEnded) {
+    console.log(`[Consumer] 检测到清理信号，跳过执行`);
+    return;
+  }
 
   const now = Date.now();
   const cutoffTime = now - CACHE_DURATION;
@@ -139,29 +150,59 @@ async function consumeData() {
   const remainingAfterProcess = await redis.zcard(QUEUE_KEY);
   console.log(`[Consumer] === 执行完成, 剩余: ${remainingAfterProcess} 条 ===`);
 
-  if (!consumerTimer) {
+  if (!consumerTimer && !isCleanup && !isTestEnded) {
     startConsumer();
   }
 }
 
 /**
- * 清理函数，停止所有定时器
+ * 清理函数 - 按顺序执行
+ * 1. 清理定时器
+ * 2. 清理残留数据
+ * 3. 关闭redis连接
+ * 4. 退出程序
  */
 async function cleanup() {
   if (isCleanup) return;
   isCleanup = true;
+  isTestEnded = true;
 
-  console.log("\n========== 清理资源 ==========");
+  console.log("\n========== 开始清理资源 ==========");
+
+  console.log("\n[步骤1/4] 清理定时器...");
+  if (producerStopTimer) {
+    clearTimeout(producerStopTimer);
+    producerStopTimer = null;
+  }
   if (producerTimer) {
     clearInterval(producerTimer);
     producerTimer = null;
+    console.log("[步骤1/4] 生产者定时器已清理");
   }
   if (consumerTimer) {
     clearInterval(consumerTimer);
     consumerTimer = null;
+    console.log("[步骤1/4] 消费者定时器已清理");
   }
-  await redis.del(QUEUE_KEY);
+  console.log("[步骤1/4] 所有定时器清理完成");
+
+  console.log("\n[步骤2/4] 清理残留数据...");
+  const remainingData = await redis.zcard(QUEUE_KEY);
+  if (remainingData > 0) {
+    await redis.del(QUEUE_KEY);
+    console.log(`[步骤2/4] 已清理 ${remainingData} 条残留数据`);
+  } else {
+    console.log("[步骤2/4] 无残留数据");
+  }
+
+  console.log("\n[步骤3/4] 关闭Redis连接...");
   await redis.quit();
+  console.log("[步骤3/4] Redis连接已关闭");
+
+  console.log("\n[步骤4/4] 退出程序...");
+  console.log("========== 清理完成 ==========\n");
+
+  process.exit(0);
 }
 
 /**
@@ -199,13 +240,7 @@ describe("缓存消费测试 - 新参数", () => {
 
     printStats();
 
-    console.log("\n========== 测试通过，清理中 ==========\n");
+    console.log("\n========== 测试通过，开始清理 ==========\n");
     await cleanup();
-  });
-
-  after(async () => {
-    if (!isCleanup) {
-      await cleanup();
-    }
   });
 });
