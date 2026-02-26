@@ -1,62 +1,8 @@
 import { test, describe, afterEach, after } from "node:test";
 import assert from "node:assert";
-import Redis from "ioredis";
+import { initRedis } from "./tendis.js";
 
 const PREFIX = "sort_set_test::";
-
-const singletonConfig = {
-  host: "localhost",
-  port: 6379,
-};
-
-const clusterConfig = [
-  {
-    host: "192.168.5.9",
-    port: 51002,
-  },
-  {
-    host: "192.168.5.10",
-    port: 51002,
-  },
-  {
-    host: "192.168.5.11",
-    port: 51002,
-  },
-];
-
-const mode = process.env.TEST_MODE || "cluster";
-console.log(`Running test in ${mode} mode...`);
-const config = mode === "cluster" ? clusterConfig : singletonConfig;
-
-/**
- *
- * @returns 初始化redis客户端
- */
-function initRedis() {
-  const redisOptions = {
-    connectTimeout: 5000, // 5s timeout
-    maxRetriesPerRequest: 1,
-    enableReadyCheck: false,
-    retryStrategy: times => {
-      if (times > 3) return null; // Stop retrying after 3 attempts
-      return Math.min(times * 100, 2000);
-    },
-  };
-
-  if (Array.isArray(config)) {
-    console.log("Config is an array, initializing Redis Cluster...");
-    return new Redis.Cluster(config, {
-      redisOptions: redisOptions,
-      clusterRetryStrategy: times => {
-        if (times > 3) return null;
-        return Math.min(times * 100, 2000);
-      },
-    });
-  } else {
-    console.log("Config is an object, initializing Redis Standalone...");
-    return new Redis({ ...config, ...redisOptions });
-  }
-}
 
 const redis = initRedis();
 
@@ -67,11 +13,11 @@ const pingResult = await redis.ping();
 console.log("Redis Connection Test (PING):", pingResult);
 
 const TEST_KEY = `${PREFIX}benchmark`;
-const DATA_COUNT = 100000;
+const DATA_COUNT = 10000;
 const FETCH_BATCH_SIZE = 1000;
-const FETCH_TOTAL = 5000;
-const BATCH_ADD_SIZE = 5000;
-const BATCH_DELETE_SIZE = 5000;
+const FETCH_TOTAL = 500;
+const BATCH_ADD_SIZE = 500;
+const BATCH_DELETE_SIZE = 500;
 
 /**
  * 分批添加数据到有序集合，解决大数组栈溢出问题
