@@ -13,6 +13,7 @@ const PRODUCER_INTERVAL = 100;
 const BATCH_SIZE = 100;
 const CONSUMER_INTERVAL = 10000;
 const CACHE_DURATION = 11000;
+const FETCH_BATCH_SIZE = 1000;
 const PRODUCER_DURATION = 50000;
 const CONSUMER_DURATION = 70000;
 
@@ -128,33 +129,45 @@ async function consumeData() {
 
   const now = Date.now();
   const cutoffTime = now - CACHE_DURATION;
-
-  const dataList = await redis.zrangebyscore(QUEUE_KEY, "-inf", cutoffTime);
   const remainingBeforeProcess = await redis.zcard(QUEUE_KEY);
 
   console.log(`[Consumer] 当前时间: ${now}, 截止时间: ${cutoffTime}`);
-  console.log(`[Consumer] 取出 ${dataList.length} 条数据 (未删除), zset当前: ${remainingBeforeProcess} 条`);
+  console.log(`[Consumer] zset当前: ${remainingBeforeProcess} 条`);
 
-  if (dataList.length > 0) {
+  let batchCount = 0;
+  let batchTotalProcessed = 0;
+
+  while (true) {
+    const dataList = await redis.zrangebyscore(QUEUE_KEY, "-inf", cutoffTime, "LIMIT", 0, FETCH_BATCH_SIZE);
+
+    if (dataList.length === 0) {
+      break;
+    }
+
+    batchCount++;
+    console.log(`[Consumer] 第${batchCount}批: 取出 ${dataList.length} 条数据`);
+
     const { success, failed } = await processData(dataList);
 
     if (success.length > 0) {
       const deleted = await redis.zrem(QUEUE_KEY, ...success);
-      console.log(`[Consumer] 处理成功 ${success.length} 条, 删除成功 ${deleted} 条`);
+      console.log(`[Consumer] 第${batchCount}批: 处理成功 ${success.length} 条, 删除成功 ${deleted} 条`);
       stats.totalProcessed += success.length;
+      batchTotalProcessed += success.length;
     }
 
     if (failed.length > 0) {
-      console.log(`[Consumer] 处理失败 ${failed.length} 条 (保留在zset中)`);
+      console.log(`[Consumer] 第${batchCount}批: 处理失败 ${failed.length} 条 (保留在zset中)`);
       stats.totalFailed += failed.length;
     }
+
+    stats.totalConsumed += dataList.length;
   }
 
-  stats.totalConsumed += dataList.length;
   stats.consumeTimes.push(now);
 
   const remainingAfterProcess = await redis.zcard(QUEUE_KEY);
-  console.log(`[Consumer] === 执行完成, 剩余: ${remainingAfterProcess} 条 ===`);
+  console.log(`[Consumer] === 执行完成, 共${batchCount}批, 处理成功${batchTotalProcessed}条, 剩余: ${remainingAfterProcess} 条 ===`);
 
   if (!consumerTimer && !isCleanup && !isTestEnded) {
     startConsumer();
