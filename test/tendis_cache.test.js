@@ -2,20 +2,68 @@ import { test, describe, afterEach, after } from "node:test";
 import assert from "node:assert";
 import { initRedis } from "./tendis.js";
 
+/**
+ * Redis key 前缀
+ * @type {string}
+ */
 const PREFIX = "cache_test::";
+
+/**
+ * Redis 客户端实例
+ * @type {import('ioredis').Redis}
+ */
 const redis = initRedis();
 
 const pingResult = await redis.ping();
 console.log("Redis Connection Test (PING):", pingResult);
 
+/**
+ * 队列键名
+ * @type {string}
+ */
 const QUEUE_KEY = `${PREFIX}queue`;
+
+/**
+ * 生产者写入间隔（毫秒）
+ * @type {number}
+ */
 const PRODUCER_INTERVAL = 100;
+
+/**
+ * 生产者每次写入的数据条数
+ * @type {number}
+ */
 const BATCH_SIZE = 100;
+
+/**
+ * 消费者执行间隔（毫秒）
+ * @type {number}
+ */
 const CONSUMER_INTERVAL = 10000;
+
+/**
+ * 数据缓存时间（毫秒），数据需要在此时间后才被处理
+ * @type {number}
+ */
 const CACHE_DURATION = 11000;
+
+/**
+ * 消费者每次从 ZSet 中获取的最大数据条数
+ * @type {number}
+ */
 const FETCH_BATCH_SIZE = 1000;
+
+/**
+ * 生产者运行时长（毫秒）
+ * @type {number}
+ */
 const PRODUCER_DURATION = 50000;
-const CONSUMER_DURATION = 70000;
+
+/**
+ * 消费者运行时长（毫秒）
+ * @type {number}
+ */
+const CONSUMER_DURATION = 80000;
 
 let producerTimer = null;
 let consumerTimer = null;
