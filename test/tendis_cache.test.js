@@ -23,9 +23,32 @@ let isCleanup = false;
 const stats = {
   totalWritten: 0,
   totalConsumed: 0,
+  totalProcessed: 0,
+  totalFailed: 0,
   writeTimes: [],
   consumeTimes: []
 };
+
+/**
+ * 模拟处理数据
+ * @param {Array} dataList - 待处理的数据列表
+ * @returns {Promise<{success: Array, failed: Array}>} - 处理成功和失败的数据
+ */
+async function processData(dataList) {
+  const success = [];
+  const failed = [];
+
+  for (const item of dataList) {
+    try {
+      await new Promise(resolve => setTimeout(resolve, 1));
+      success.push(item);
+    } catch (e) {
+      failed.push(item);
+    }
+  }
+
+  return { success, failed };
+}
 
 /**
  * 子程序1：模拟消息队列生产者
@@ -64,7 +87,9 @@ function startProducer() {
 /**
  * 子程序2：缓存消费者
  * 每10秒执行一次，执行前暂停定时器，执行完后重新启动
- * 使用zremrangebyscore取出并删除缓存时间之前的数据
+ * 1. 先用 zrangebyscore 获取数据（不删除）
+ * 2. 处理数据
+ * 3. 处理成功后用 zrem 删除已处理的数据
  */
 function startConsumer() {
   console.log(`[Consumer] 启动消费者，每${CONSUMER_INTERVAL/1000}秒执行一次`);
@@ -81,15 +106,32 @@ async function consumeData() {
   const now = Date.now();
   const cutoffTime = now - CACHE_DURATION;
 
-  const consumed = await redis.zremrangebyscore(QUEUE_KEY, "-inf", cutoffTime);
-  const remaining = await redis.zcard(QUEUE_KEY);
-
-  stats.totalConsumed += consumed;
-  stats.consumeTimes.push(now);
+  const dataList = await redis.zrangebyscore(QUEUE_KEY, "-inf", cutoffTime);
+  const remainingBeforeProcess = await redis.zcard(QUEUE_KEY);
 
   console.log(`[Consumer] 当前时间: ${now}, 截止时间: ${cutoffTime}`);
-  console.log(`[Consumer] 取出并删除了 ${consumed} 条数据, 剩余: ${remaining} 条`);
-  console.log(`[Consumer] === 执行完成 ===`);
+  console.log(`[Consumer] 取出 ${dataList.length} 条数据 (未删除), zset当前: ${remainingBeforeProcess} 条`);
+
+  if (dataList.length > 0) {
+    const { success, failed } = await processData(dataList);
+
+    if (success.length > 0) {
+      const deleted = await redis.zrem(QUEUE_KEY, ...success);
+      console.log(`[Consumer] 处理成功 ${success.length} 条, 删除成功 ${deleted} 条`);
+      stats.totalProcessed += success.length;
+    }
+
+    if (failed.length > 0) {
+      console.log(`[Consumer] 处理失败 ${failed.length} 条 (保留在zset中)`);
+      stats.totalFailed += failed.length;
+    }
+  }
+
+  stats.totalConsumed += dataList.length;
+  stats.consumeTimes.push(now);
+
+  const remainingAfterProcess = await redis.zcard(QUEUE_KEY);
+  console.log(`[Consumer] === 执行完成, 剩余: ${remainingAfterProcess} 条 ===`);
 
   if (!consumerTimer) {
     startConsumer();
@@ -122,10 +164,11 @@ async function cleanup() {
 function printStats() {
   console.log("\n========== 测试统计结果 ==========");
   console.log(`总写入数据: ${stats.totalWritten} 条`);
-  console.log(`总消费数据: ${stats.totalConsumed} 条`);
+  console.log(`总取出数据: ${stats.totalConsumed} 条`);
+  console.log(`处理成功: ${stats.totalProcessed} 条`);
+  console.log(`处理失败: ${stats.totalFailed} 条`);
   console.log(`理论写入速率: ${1000/PRODUCER_INTERVAL} 条/秒`);
   console.log(`理论消费次数: ${Math.floor(PRODUCER_DURATION/CONSUMER_INTERVAL)} 次`);
-  console.log(`预期消费数据: ~${Math.floor(PRODUCER_DURATION/1000 * 1000/PRODUCER_INTERVAL * (CACHE_DURATION/1000 - 1))} 条`);
   console.log("==================================\n");
 }
 
